@@ -1,0 +1,9 @@
+# Environment files
+.env
+
+# VS Code settings
+.vscode/
+
+# Evaluation datasets
+evaluation/Gen_AI Dataset.xlsx - Test-Set.csv
+evaluation/Gen_AI Dataset.xlsx - Train-Set (1).csv
