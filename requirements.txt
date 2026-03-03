@@ -1,5 +1,6 @@
 groq
 huggingface-hub
+langchain-google-genai
 langchain
 langchain-community
 langchain-core
