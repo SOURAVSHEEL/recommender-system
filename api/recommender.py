@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-
+import threading
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -40,17 +40,33 @@ reranking_prompt = (PROMPTS_DIR / "reranking.md").read_text(encoding="utf-8").st
 
 
 
-gemini_expansion = genai.GenerativeModel(
-    model_name=GEMINI_MODEL,
-    generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=1024),
-    api_key=GOOGLE_API_KEY_2
-)
+# a threading Lock so concurrent requests don't overwrite each other's key.
+genai_lock = threading.Lock()
 
-gemini_rerank = genai.GenerativeModel(
-    model_name=GEMINI_MODEL,
-    generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=8192),
-    api_key=GOOGLE_API_KEY
-)
+EXPANSION = genai.GenerationConfig(temperature=1, max_output_tokens=4096)
+RERANK    = genai.GenerationConfig(temperature=0, max_output_tokens=8192)
+
+
+def call_expansion(prompt: str):
+    """Call Gemini for query expansion using GOOGLE_API_KEY_2."""
+    with genai_lock:
+        genai.configure(api_key=GOOGLE_API_KEY_2)
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            generation_config=EXPANSION,
+        )
+        return model.generate_content(prompt)
+
+
+def call_rerank(prompt: str):
+    """Call Gemini for LLM reranking using GOOGLE_API_KEY."""
+    with genai_lock:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            generation_config=RERANK,
+        )
+        return model.generate_content(prompt)
 
 # ── Stopwords — remove noise words that hurt BM25 precision ──────────────────
 
@@ -79,11 +95,16 @@ def tokenize(text: str) -> list[str]:
 # ── Query expansion via Gemini ────────────────────────────────────────────────
 
 def strip_fences(text: str) -> str:
-    """Remove markdown code fences and surrounding whitespace."""
+    """Remove markdown code fences wherever they appear in the text.
+
+    Gemini sometimes adds prose before the fence, puts the fence on the same
+    line as the JSON, or omits the closing newline — handle all cases.
+    """
     text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text.strip())
+    # Remove opening fence (with optional language tag and optional space/newline)
+    text = re.sub(r"```[a-z]*[ \t]*\n?", "", text)
+    # Remove closing fence
+    text = re.sub(r"\n?```", "", text)
     return text.strip()
 
 
@@ -104,6 +125,60 @@ def sanitise_for_prompt(text: str) -> str:
     return text
 
 
+def _parse_expansion(raw: str) -> dict:
+    """
+    Robustly extract semantic + keywords from Gemini expansion response.
+
+    Handles all observed failure modes:
+      1. Perfect JSON                          -> json.loads
+      2. Single-quoted Python dict             -> ast.literal_eval
+      3. Truncated JSON (no closing brace)     -> regex field extraction
+      4. Double braces {{...}}                 -> normalise then retry
+    """
+    import ast as _ast
+
+    # Normalise double braces from old .format()-style prompts
+    text = raw.replace("{{", "{").replace("}}", "}")
+
+    # Attempt 1: standard JSON parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: find complete {...} block and try again (handles prose wrapping)
+    match = re.search(r'\{[^{}]*"semantic".*?"keywords".*?\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # Attempt 3: ast.literal_eval for single-quoted dicts
+    try:
+        result = _ast.literal_eval(text)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+
+    # Attempt 4: truncated response — extract values via regex directly
+    # This fires when the response is cut off before the closing }
+    semantic, keywords = "", ""
+    m = re.search(r'"semantic"\s*:\s*"(.*?)(?:"|$)', text, re.DOTALL)
+    if m:
+        semantic = m.group(1).rstrip('"').strip()
+    m = re.search(r'"keywords"\s*:\s*"(.*?)(?:"|$)', text, re.DOTALL)
+    if m:
+        keywords = m.group(1).rstrip('"').strip()
+
+    if semantic and keywords:
+        log.debug("Expansion parsed via field extraction (response was truncated)")
+        return {"semantic": semantic, "keywords": keywords}
+
+    raise ValueError(f"Could not parse expansion response: {raw[:120]!r}")
+
+
 def expand_query(query: str) -> tuple[str, str]:
     """
     Calls Gemini with query_expansion.md prompt which returns JSON:
@@ -119,21 +194,16 @@ def expand_query(query: str) -> tuple[str, str]:
     t0 = time.time()
     safe_query = sanitise_for_prompt(query)
     prompt = (
-        f"{system_prompt}\n\n"
-        f"{expansion_prompt.format(query=safe_query)}"
+        system_prompt + "\n\n"
+        + expansion_prompt.replace("{query}", safe_query)
     )
     try:
-        response = gemini_expansion.generate_content(prompt)
+        response = call_expansion(prompt)
         raw = strip_fences(response.text)
-        # Attempt direct parse; if it fails try to extract just the JSON object
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Gemini sometimes wraps JSON in prose — find the first { ... } block
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if not match:
-                raise
-            parsed = json.loads(match.group())
+        log.debug("Raw expansion response: %s", raw[:300])
+
+        parsed = _parse_expansion(raw)
+
         semantic = parsed.get("semantic", "").strip()
         keywords = parsed.get("keywords", "").strip()
         if not semantic or not keywords:
@@ -271,7 +341,7 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
             + "\n\nIMPORTANT: Reply with a JSON array of URL strings ONLY. "
               "No explanation, no code fences, no extra text."
         )
-        response = gemini_rerank.generate_content(prompt)
+        response = call_rerank(prompt)
         raw = strip_fences(response.text)
         log.info("LLM reranker response (%.2fs), %d chars: %s", time.time() - t0, len(raw), raw[:300])
 

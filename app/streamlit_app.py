@@ -17,6 +17,7 @@ from app.components import inject_css, result_card, sidebar_legend
 API_URL = "https://shl-recommender-system-ivjb.onrender.com"
 
 
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
