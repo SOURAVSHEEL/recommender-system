@@ -67,7 +67,7 @@ def tokenize(text: str) -> list[str]:
 
 # ── Query expansion via Gemini ────────────────────────────────────────────────
 
-def strip_fences(text: str) -> str:
+def _strip_fences(text: str) -> str:
     """Remove markdown code fences and surrounding whitespace."""
     text = text.strip()
     if text.startswith("```"):
@@ -86,7 +86,7 @@ def expand_query(query: str) -> str:
         "IMPORTANT: Reply with plain text only. Do NOT use JSON, code fences, or any formatting."
     )
     response = gemini.generate_content(prompt)
-    expanded = strip_fences(response.text)
+    expanded = _strip_fences(response.text)
     # Safety fallback: if response still looks like JSON, use original query
     if expanded.startswith("{") or expanded.startswith("["):
         log.warning("Gemini returned JSON for query expansion — falling back to original query")
@@ -212,7 +212,7 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
     try:
         rerank_client = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
-            generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=2048),
+            generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=8192),
         )
         prompt = (
             f"{system_prompt}\n\n"
@@ -220,15 +220,22 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
                 query=query,
                 candidates=json.dumps(slim, indent=2),
             )
+            + "\n\nIMPORTANT: Reply with a JSON array of URL strings ONLY. "
+              "No explanation, no code fences, no extra text."
         )
         response = rerank_client.generate_content(prompt)
-        raw = response.text.strip()
-        log.info("LLM reranker response (%.2fs): %s", time.time() - t0, raw[:200])
+        raw = _strip_fences(response.text)
+        log.info("LLM reranker response (%.2fs), %d chars: %s", time.time() - t0, len(raw), raw[:300])
 
-        # Strip markdown code fences if Gemini wraps output in ```json ... ```
-        if raw.startswith("```"):
-            raw = re.sub(r"^```[a-z]*\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
+        # If JSON is truncated, recover the partial list by closing the array
+        if not raw.endswith("]"):
+            log.warning("Reranker response appears truncated (%d chars) — attempting recovery", len(raw))
+            # Drop the last (incomplete) item and close the array
+            last_complete = raw.rfind('",')
+            if last_complete != -1:
+                raw = raw[: last_complete + 1] + "\n]"
+            else:
+                raise ValueError("Cannot recover truncated JSON")
 
         url_order = json.loads(raw)
         if not isinstance(url_order, list):
