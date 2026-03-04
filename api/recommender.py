@@ -51,10 +51,10 @@ STOPWORDS = {
     "this","that","these","those","who","which","what","how","when","where",
     "can","also","not","no","as","if","so","all","some","any","each","than",
     "then","just","about","up","out","into","more","very","want","need",
-    "looking","hiring","hire","find","recommend","suggest","assessment",
-    "assessments","test","tests","role","position","candidate","candidates",
-    "company","team","business","work","working","experience","years","year",
-    "new","level","long","max","maximum","duration","minutes","min","hour",
+    "looking","hiring","hire","find","recommend","suggest",
+    "role","position","candidate","candidates",
+    "company","work","working","experience","years","year",
+    "long","max","maximum","duration","minutes","min","hour",
     "please","me","us","am","im","like","get","use","using","based","good",
 }
 
@@ -67,7 +67,7 @@ def tokenize(text: str) -> list[str]:
 
 # ── Query expansion via Gemini ────────────────────────────────────────────────
 
-def _strip_fences(text: str) -> str:
+def strip_fences(text: str) -> str:
     """Remove markdown code fences and surrounding whitespace."""
     text = text.strip()
     if text.startswith("```"):
@@ -76,27 +76,68 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def expand_query(query: str) -> str:
+def sanitise_for_prompt(text: str) -> str:
+    """
+    Escape characters that cause JSON parse errors when Gemini echoes
+    user-supplied text back inside a JSON string value.
+    Replaces curly quotes, apostrophes in contractions, and stray backslashes.
+    """
+    # Replace curly / typographic apostrophes and quotes with straight versions
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    # Escape lone backslashes so they don't corrupt JSON
+    text = text.replace("\\", "\\\\")
+    # Replace unescaped apostrophes inside words (contractions) with a space
+    # so Gemini doesn't try to include them verbatim in a JSON string
+    text = re.sub(r"(?<=\w)\'(?=\w)", " ", text)
+    return text
+
+
+def expand_query(query: str) -> tuple[str, str]:
+    """
+    Calls Gemini with query_expansion.md prompt which returns JSON:
+      {"semantic": "...", "keywords": "..."}
+
+    Returns (semantic_query, keyword_query):
+      - semantic: rich paragraph for FAISS vector search
+      - keywords: short distilled phrase for BM25 keyword search
+
+    Falls back to (query, query) on any error.
+    """
     log.info("Expanding query via Gemini (%s) ...", GEMINI_MODEL)
     t0 = time.time()
-    # Explicitly tell Gemini: plain text only, no JSON, no code fences
+    safe_query = sanitise_for_prompt(query)
     prompt = (
         f"{system_prompt}\n\n"
-        f"{expansion_prompt.format(query=query)}\n\n"
-        "IMPORTANT: Reply with plain text only. Do NOT use JSON, code fences, or any formatting."
+        f"{expansion_prompt.format(query=safe_query)}"
     )
-    response = gemini.generate_content(prompt)
-    expanded = _strip_fences(response.text)
-    # Safety fallback: if response still looks like JSON, use original query
-    if expanded.startswith("{") or expanded.startswith("["):
-        log.warning("Gemini returned JSON for query expansion — falling back to original query")
-        expanded = query
-    log.info("Query expanded (%.2fs) — %d -> %d chars", time.time() - t0, len(query), len(expanded))
-    log.info("Expanded query: %s", expanded)
-    return expanded
+    try:
+        response = gemini.generate_content(prompt)
+        raw = strip_fences(response.text)
+        # Attempt direct parse; if it fails try to extract just the JSON object
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            # Gemini sometimes wraps JSON in prose — find the first { ... } block
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if not match:
+                raise
+            parsed = json.loads(match.group())
+        semantic = parsed.get("semantic", "").strip()
+        keywords = parsed.get("keywords", "").strip()
+        if not semantic or not keywords:
+            raise ValueError("Missing semantic or keywords field in expansion response")
+        log.info(
+            "Query expanded (%.2fs) — semantic: %d chars | keywords: %d chars",
+            time.time() - t0, len(semantic), len(keywords),
+        )
+        log.info("Keywords: %s", keywords)
+        return semantic, keywords
+    except Exception as e:
+        log.warning("Query expansion failed (%s) — falling back to original query", e)
+        return query, query
 
 
-# ── Lazy singletons ───────────────────────────────────────────────────────────
 
 vector_store : FAISS | None     = None
 bm25         : BM25Okapi | None = None
@@ -224,18 +265,27 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
               "No explanation, no code fences, no extra text."
         )
         response = rerank_client.generate_content(prompt)
-        raw = _strip_fences(response.text)
+        raw = strip_fences(response.text)
         log.info("LLM reranker response (%.2fs), %d chars: %s", time.time() - t0, len(raw), raw[:300])
 
-        # If JSON is truncated, recover the partial list by closing the array
+        # Extract JSON array even when Gemini wraps it in prose/explanation
+        # Strategy: find the first "[" and the last "]" in the response
+        array_start = raw.find("[")
+        array_end   = raw.rfind("]")
+        if array_start != -1 and array_end > array_start:
+            raw = raw[array_start: array_end + 1]
+        elif not raw.startswith("["):
+            raise ValueError("No JSON array found in reranker response")
+
+        # If the array appears truncated (no closing bracket found above won't
+        # trigger, but inner URLs may be cut) — recover partial list
         if not raw.endswith("]"):
-            log.warning("Reranker response appears truncated (%d chars) — attempting recovery", len(raw))
-            # Drop the last (incomplete) item and close the array
+            log.warning("Reranker array appears truncated (%d chars) — attempting recovery", len(raw))
             last_complete = raw.rfind('",')
             if last_complete != -1:
                 raw = raw[: last_complete + 1] + "\n]"
             else:
-                raise ValueError("Cannot recover truncated JSON")
+                raise ValueError("Cannot recover truncated reranker JSON")
 
         url_order = json.loads(raw)
         if not isinstance(url_order, list):
@@ -301,12 +351,57 @@ _SENIORITY_RULES: list[tuple[list[str], str]] = [
 
 
 def detect_seniority(query: str) -> str | None:
-    """Return 'junior' | 'mid' | 'manager' | 'senior' | None."""
-    q = " " + query.lower() + " "
-    for phrases, tier in _SENIORITY_RULES:
-        if any(p in q for p in phrases):
-            log.info("Seniority detected: %s", tier)
-            return tier
+    """Return 'junior' | 'mid' | 'manager' | 'senior' | None.
+
+    For soft signals like 'manager' and 'graduate', only match against the
+    first 150 chars (the user's own framing) to avoid false matches inside
+    job description body text such as 'manager guidance' or 'graduate programme'.
+    Strong executive / director titles are matched across the full query.
+    """
+    q_full  = " " + query.lower() + " "
+    # Only the user's leading request text — avoids matching JD body
+    q_short = " " + query[:150].lower() + " "
+
+    # C-suite / executive — safe to match anywhere in full query
+    for phrase in ["coo", "ceo", "cto", "cfo", "c-suite", "chief operating",
+                   "chief executive", "chief technology", "chief financial",
+                   "vice president", " vp ", "evp", "svp", "president and",
+                   "managing director"]:
+        if phrase in q_full:
+            log.info("Seniority detected: senior")
+            return "senior"
+
+    # Director-level — full query safe
+    for phrase in ["director", "head of", "general manager"]:
+        if phrase in q_full:
+            log.info("Seniority detected: senior")
+            return "senior"
+
+    # Junior — explicit phrases are unambiguous, safe anywhere
+    for phrase in ["new graduate", "new graduates", "fresh graduate", "fresh graduates",
+                   "fresher", "entry level", "entry-level", "0-2 year", "0 to 2 year",
+                   "0 - 2 year", "0-2 year", "no experience", "0 years"]:
+        if phrase in q_full:
+            log.info("Seniority detected: junior")
+            return "junior"
+
+    # 'graduate' alone is ambiguous — only match in user's short prefix
+    if "graduate" in q_short:
+        log.info("Seniority detected: junior")
+        return "junior"
+
+    # Manager / team lead — short prefix only (avoids 'manager guidance' in JD body)
+    for phrase in ["manager", "team lead", "supervisor", "front line manager"]:
+        if phrase in q_short:
+            log.info("Seniority detected: manager")
+            return "manager"
+
+    # Mid / senior IC — short prefix only
+    for phrase in ["senior ", "sr. ", "lead ", "mid-level", "mid level"]:
+        if phrase in q_short:
+            log.info("Seniority detected: mid")
+            return "mid"
+
     return None
 
 
@@ -355,10 +450,12 @@ def recommend(query: str) -> list[dict]:
     if max_duration:
         log.info("Duration constraint: <= %d minutes", max_duration)
 
-    expanded   = expand_query(query)
+    semantic_query, keyword_query = expand_query(query)
+    log.info("Semantic query (%.80s%s)", semantic_query, "..." if len(semantic_query) > 80 else "")
+    log.info("Keyword query: %s", keyword_query)
     t0         = time.time()
-    semantic   = semantic_search(expanded)
-    keyword    = keyword_search(expanded)
+    semantic   = semantic_search(semantic_query)   # FAISS uses rich semantic paragraph
+    keyword    = keyword_search(keyword_query)     # BM25 uses tight keyword phrase
     candidates = reciprocal_rank_fusion(semantic, keyword)
     log.info("Hybrid search done (%.2fs) — %d candidates", time.time() - t0, len(candidates))
 
