@@ -93,32 +93,6 @@ def get_url(url: str, params: dict = None) -> Optional[BeautifulSoup]:
 
 # ─── Catalog listing page parser ─────────────────────────────────────────────
 
-def _has_indicator(td) -> bool:
-    """
-    Return True if a table cell contains a green-dot indicator.
-
-    SHL may render this as:
-      - <span class="...catalogue__circle..."> or similar CSS-styled span
-      - <img> tag
-      - <svg> element
-      - Any child element inside the cell (empty cells have no children)
-
-    We treat the cell as 'Yes' if it contains ANY child tag, since empty
-    cells (meaning 'No') contain only whitespace text and no child elements.
-    """
-    # Check for img or svg explicitly
-    if td.find(["img", "svg"]):
-        return True
-    # Check for any span (green dot is typically a styled <span>)
-    spans = td.find_all("span")
-    if spans:
-        return True
-    # Fallback: any child element at all means the cell is marked
-    if td.find():
-        return True
-    return False
-
-
 def parse_listing_page(soup: BeautifulSoup) -> list[dict]:
     """
     Extract rows from the 'Individual Test Solutions' table on a catalog page.
@@ -158,14 +132,11 @@ def parse_listing_page(soup: BeautifulSoup) -> list[dict]:
         href = a_tag.get("href", "")
         url  = urljoin(BASE_URL, href)
 
-        # ── Column 1: Remote Testing icon (green dot = Yes) ─────────────────
-        # SHL renders the green dot as a <span> with a CSS class (not <img>).
-        # We check for any non-empty child element (span, img, svg, etc.) OR
-        # non-whitespace text that signals presence of the indicator.
-        remote_testing = _has_indicator(tds[1]) if len(tds) > 1 else False
+        # ── Column 1: Remote Testing icon (img present = Yes) ────────────────
+        remote_testing = bool(tds[1].find("img")) if len(tds) > 1 else False
 
         # ── Column 2: Adaptive/IRT icon ──────────────────────────────────────
-        adaptive = _has_indicator(tds[2]) if len(tds) > 2 else False
+        adaptive = bool(tds[2].find("img")) if len(tds) > 2 else False
 
         # ── Column 3: Test type badges  e.g. [C][P][A][B] ───────────────────
         test_type_codes = []

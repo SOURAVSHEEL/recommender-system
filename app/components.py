@@ -1,4 +1,3 @@
-
 import streamlit as st
 
 TEST_TYPE_COLORS = {
@@ -141,8 +140,8 @@ def result_card(rank: int, assessment: dict):
     chips  = ""
     if duration:
         chips += chip_html(f"⏱ {duration} min")
-    chips += chip_html("🌐 Remote", active=remote)
-    chips += chip_html("⚡ Adaptive", active=adaptive)
+    chips += chip_html(f"🌐 Remote: {'Yes' if remote else 'No'}", active=remote)
+    chips += chip_html(f"⚡ Adaptive: {'Yes' if adaptive else 'No'}", active=adaptive)
 
 
     st.markdown(f"""
@@ -235,10 +234,10 @@ def sidebar_legend():
          "Duration",
          "Approximate time to complete the assessment in minutes."),
         ("🌐", "#DCFCE7", "#15803D",
-         "Remote",
+         "Remote: Yes / No",
          "Assessment can be taken online — no test centre required."),
         ("⚡", "#DCFCE7", "#15803D",
-         "Adaptive",
+         "Adaptive: Yes / No",
          "Computer-adaptive: question difficulty adjusts to candidate responses for a shorter, more precise test."),
     ]
 
