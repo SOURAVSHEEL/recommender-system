@@ -39,19 +39,17 @@ reranking_prompt = (PROMPTS_DIR / "reranking.md").read_text(encoding="utf-8").st
 #   gemini_rerank    : KEY_1  — LLM reranker     (heavy, long context, called once per request)
 
 
-client_expansion = genai.GenerativeClient(api_key=GOOGLE_API_KEY_2)
-client_rerank    = genai.GenerativeClient(api_key=GOOGLE_API_KEY)
 
 gemini_expansion = genai.GenerativeModel(
     model_name=GEMINI_MODEL,
     generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=1024),
-    client=client_expansion,
+    api_key=GOOGLE_API_KEY_2
 )
 
 gemini_rerank = genai.GenerativeModel(
     model_name=GEMINI_MODEL,
     generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=8192),
-    client=client_rerank,
+    api_key=GOOGLE_API_KEY
 )
 
 # ── Stopwords — remove noise words that hurt BM25 precision ──────────────────
