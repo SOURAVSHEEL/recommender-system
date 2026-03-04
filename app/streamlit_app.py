@@ -30,65 +30,38 @@ inject_css()
 
 # ── API helpers ───────────────────────────────────────────────────────────────
 
-def wait_for_api(status_placeholder, retries: int = 10, delay: int = 5) -> bool:
-    """Ping the URL repeatedly until it responds or retries are exhausted."""
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.get(f"{API_URL}/health", timeout=6)
-            if resp.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
+def ping_api() -> bool:
+    """Return True if API is already up."""
+    try:
+        resp = requests.get(f"{API_URL}/health", timeout=6)
+        return resp.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
+
+def wake_api(status_placeholder) -> bool:
+    """Wait for the API to wake up, updating status_placeholder each retry."""
+    for attempt in range(1, 11):
+        if ping_api():
+            return True
         status_placeholder.info(
-            f"Server is waking up... (attempt {attempt}/{retries}). "
+            f"⏳ Server is waking up... (attempt {attempt}/10). "
             f"This can take 30–40 seconds on first load."
         )
-        time.sleep(delay)
-
+        time.sleep(5)
     return False
 
 
-def get_available_api_url(status_placeholder) -> str | None:
-    """Ping API; if sleeping, wait for it to wake up."""
-
-    # ── Quick ping ────────────────────────────────────────────────────────────
-    try:
-        resp = requests.get(f"{API_URL}/health", timeout=6)
-        if resp.status_code == 200:
-            return API_URL
-    except requests.exceptions.RequestException:
-        pass
-
-    # ── Not up yet — wait for it to wake ─────────────────────────────────────
-    status_placeholder.warning(
-        "Server appears to be sleeping. Waiting for it to wake up "
-        "(this usually takes 30–40 seconds)..."
-    )
-
-    if wait_for_api(status_placeholder):
-        return API_URL
-
-    status_placeholder.error("Server did not respond after multiple retries.")
-    return None
-
-
 def call_api(query: str, status_placeholder) -> list[dict] | None:
-    api_url = get_available_api_url(status_placeholder)
-
-    if api_url is None:
-        st.error("Server is unavailable. Please try again in a moment.")
-        return None
-
-    status_placeholder.success("Connected to API.")
-
+    status_placeholder.info("🔄 Sending request...")
     try:
         resp = requests.post(
-            f"{api_url}/recommend",
+            f"{API_URL}/recommend",
             json={"query": query},
             timeout=120,
         )
         resp.raise_for_status()
+        status_placeholder.empty()
         return resp.json().get("recommended_assessments", [])
     except requests.exceptions.ConnectionError:
         st.error("Cannot connect to API. Please try again.")
@@ -105,6 +78,33 @@ def call_api(query: str, status_placeholder) -> list[dict] | None:
     except (ValueError, KeyError) as e:
         st.error(f"Failed to parse API response: {str(e)}")
     return None
+
+
+# ── Startup health check (runs once on page load) ─────────────────────────────
+
+if "api_ready" not in st.session_state:
+    st.session_state.api_ready = False
+
+if not st.session_state.api_ready:
+    startup_placeholder = st.empty()
+    if ping_api():
+        st.session_state.api_ready = True
+    else:
+        startup_placeholder.warning(
+            "🌙 Server appears to be sleeping. Waking it up — "
+            "this usually takes 30–40 seconds..."
+        )
+        if wake_api(startup_placeholder):
+            st.session_state.api_ready = True
+            startup_placeholder.success("🟢 Server is ready!")
+            time.sleep(1)
+            startup_placeholder.empty()
+        else:
+            startup_placeholder.error(
+                "❌ Server did not respond after multiple retries. "
+                "Please refresh the page."
+            )
+            st.stop()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -134,9 +134,9 @@ query = st.text_area(
 
 col_btn, col_clear, _ = st.columns([1, 1, 6])
 with col_btn:
-    search = st.button("Search", use_container_width=True, type="primary")
+    search = st.button("🔍  Search", use_container_width=True, type="primary")
 with col_clear:
-    clear = st.button("Clear", use_container_width=True)
+    clear = st.button("✕  Clear", use_container_width=True)
 
 if clear:
     st.rerun()
@@ -150,7 +150,7 @@ if search:
         st.warning("Please enter a query or URL.")
         st.stop()
 
-    status_placeholder = st.empty()  # single slot for all API status messages
+    status_placeholder = st.empty()
 
     with st.spinner("Running hybrid search and reranking..."):
         assessments = call_api(query.strip(), status_placeholder)

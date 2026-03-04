@@ -21,7 +21,7 @@ from rank_bm25 import BM25Okapi
 
 from api.config import (
     STORE_PATH, PROMPTS_DIR,
-    GOOGLE_API_KEY, GOOGLE_EMBED_MODEL, GEMINI_MODEL,
+    GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_EMBED_MODEL, GEMINI_MODEL,
     TOP_K_SEMANTIC, TOP_K_KEYWORD, TOP_K_RERANK, TOP_K_FINAL,
 )
 
@@ -33,12 +33,25 @@ system_prompt    = (PROMPTS_DIR / "system.md").read_text(encoding="utf-8").strip
 expansion_prompt = (PROMPTS_DIR / "query_expansion.md").read_text(encoding="utf-8").strip()
 reranking_prompt = (PROMPTS_DIR / "reranking.md").read_text(encoding="utf-8").strip()
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
+# ── Gemini clients — two separate API keys to avoid rate-limit contention ─────
+#
+#   gemini_expansion : KEY_2  — query expansion  (short, fast, called once per request)
+#   gemini_rerank    : KEY_1  — LLM reranker     (heavy, long context, called once per request)
 
-genai.configure(api_key=GOOGLE_API_KEY)
-gemini = genai.GenerativeModel(
+
+client_expansion = genai.GenerativeClient(api_key=GOOGLE_API_KEY_2)
+client_rerank    = genai.GenerativeClient(api_key=GOOGLE_API_KEY)
+
+gemini_expansion = genai.GenerativeModel(
     model_name=GEMINI_MODEL,
     generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=1024),
+    client=client_expansion,
+)
+
+gemini_rerank = genai.GenerativeModel(
+    model_name=GEMINI_MODEL,
+    generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=8192),
+    client=client_rerank,
 )
 
 # ── Stopwords — remove noise words that hurt BM25 precision ──────────────────
@@ -112,7 +125,7 @@ def expand_query(query: str) -> tuple[str, str]:
         f"{expansion_prompt.format(query=safe_query)}"
     )
     try:
-        response = gemini.generate_content(prompt)
+        response = gemini_expansion.generate_content(prompt)
         raw = strip_fences(response.text)
         # Attempt direct parse; if it fails try to extract just the JSON object
         try:
@@ -251,10 +264,6 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
     log.info("LLM reranking %d candidates via Gemini (%s) ...", len(slim), GEMINI_MODEL)
     t0 = time.time()
     try:
-        rerank_client = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            generation_config=genai.GenerationConfig(temperature=0, max_output_tokens=8192),
-        )
         prompt = (
             f"{system_prompt}\n\n"
             + reranking_prompt.format(
@@ -264,7 +273,7 @@ def llm_rerank(query: str, candidates: list[dict]) -> list[dict]:
             + "\n\nIMPORTANT: Reply with a JSON array of URL strings ONLY. "
               "No explanation, no code fences, no extra text."
         )
-        response = rerank_client.generate_content(prompt)
+        response = gemini_rerank.generate_content(prompt)
         raw = strip_fences(response.text)
         log.info("LLM reranker response (%.2fs), %d chars: %s", time.time() - t0, len(raw), raw[:300])
 

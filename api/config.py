@@ -33,7 +33,11 @@ if not GOOGLE_API_KEY:
         f"Add it to: {BASE_DIR / '.env'}"
     )
 
-# Gemini (query expansion + reranking)Gemini 2.5 Flash
+# Second API key — used exclusively for query expansion
+# Falls back to GOOGLE_API_KEY if not set
+GOOGLE_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GOOGLE_API_KEY
+
+# Gemini (query expansion + reranking) — Gemini 2.5 Flash
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ── Retrieval tuning ──────────────────────────────────────────────────────────
