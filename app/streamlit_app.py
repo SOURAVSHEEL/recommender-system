@@ -48,7 +48,7 @@ def wake_api(status_placeholder) -> bool:
         status_placeholder.info(
             f"⏳ Server is waking up... (attempt {attempt}/20). "
             f"This can take few mintues on first load. Please reload the page multiple times."
-            f"Once the Backend server will run, UI screen will be invisible"
+            f"Once the Backend server will run, UI screen will be visible"
         )
         time.sleep(15)
     return False
