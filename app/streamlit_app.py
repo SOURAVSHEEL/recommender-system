@@ -42,14 +42,15 @@ def ping_api() -> bool:
 
 def wake_api(status_placeholder) -> bool:
     """Wait for the API to wake up, updating status_placeholder each retry."""
-    for attempt in range(1, 11):
+    for attempt in range(1, 20):
         if ping_api():
             return True
         status_placeholder.info(
-            f"⏳ Server is waking up... (attempt {attempt}/10). "
-            f"This can take 30–40 seconds on first load."
+            f"⏳ Server is waking up... (attempt {attempt}/20). "
+            f"This can take few mintues on first load. Please reload the page multiple times."
+            f"Once the Backend server will run, UI screen will be invisible"
         )
-        time.sleep(5)
+        time.sleep(15)
     return False
 
 
@@ -126,7 +127,6 @@ query = st.text_area(
     label="query",
     placeholder=(
         "e.g. I need a Java developer who can collaborate with business teams\n\n"
-        "or https://jobs.example.com/senior-data-analyst\n\n"
         "or paste a full job description here..."
     ),
     height=150,
