@@ -119,7 +119,7 @@ sidebar_legend()
 # ── Header ────────────────────────────────────────────────────────────────────
 
 st.markdown("## 🎯 SHL Assessment Recommender")
-st.markdown("Enter a **job description**, **natural language query**, or paste a **URL** to a job posting.")
+st.markdown("Enter a **job description**, **natural language query**")
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 
